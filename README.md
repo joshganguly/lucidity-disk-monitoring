@@ -206,11 +206,8 @@ python -m pytest tests/test_monitoring.py -v
 
 ## 📚 Documentation
 
-- [📖 Architecture Details](ARCHITECTURE.md)
-- [🚀 Deployment Guide](DEPLOYMENT.md)
-- [🔒 Security Guide](docs/SECURITY.md)
-- [🛠️ Troubleshooting](docs/TROUBLESHOOTING.md)
-- [💰 Cost Optimization](docs/COST_OPTIMIZATION.md)
+- [📚 Documentation Details](documentation.md)
+
 
 ## 🤝 Contributing
 
