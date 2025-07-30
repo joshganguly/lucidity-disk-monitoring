@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scalable Disk Monitoring Architecture</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #ff6b6b, #ee5a24);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            margin: 0;
+            font-size: 2.5em;
+            font-weight: 300;
+        }
+        
+        .header p {
+            margin: 10px 0 0 0;
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
+        
+        .diagram-container {
+            position: relative;
+            padding: 40px;
+            background: #f8f9fa;
+        }
+        
+        .account-section {
+            background: white;
+            border-radius: 12px;
+            margin: 20px 0;
+            padding: 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.08);
+            border-left: 6px solid #4ecdc4;
+        }
+        
+        .central-account {
+            border-left-color: #ff6b6b;
+            background: linear-gradient(135deg, #fff5f5, #ffffff);
+        }
+        
+        .target-account {
+            border-left-color: #4ecdc4;
+            background: linear-gradient(135deg, #f0fdfc, #ffffff);
+        }
+        
+        .account-title {
+            font-size: 1.4em;
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+        }
+        
+        .aws-icon {
+            width: 30px;
+            height: 30px;
+            background: #ff9900;
+            border-radius: 6px;
+            margin-right: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+        }
+        
+        .service-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 15px 0;
+        }
+        
+        .service-box {
+            background: white;
+            border: 2px solid #e9ecef;
+            border-radius: 10px;
+            padding: 15px;
+            text-align: center;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+        
+        .service-box:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+            border-color: #4ecdc4;
+        }
+        
+        .service-icon {
+            width: 40px;
+            height: 40px;
+            margin: 0 auto 10px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+        
+        .cloudwatch { background: #ff6b6b; }
+        .iam { background: #4ecdc4; }
+        .ssm { background: #45b7d1; }
+        .config { background: #f39c12; }
+        .sns { background: #e74c3c; }
+        .ansible { background: #ee5a24; }
+        .ec2 { background: #3498db; }
+        
+        .service-name {
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 5px;
+        }
+        
+        .service-desc {
+            font-size: 0.85em;
+            color: #7f8c8d;
+            line-height: 1.3;
+        }
+        
+        .flow-arrow {
+            position: relative;
+            text-align: center;
+            margin: 20px 0;
+            color: #7f8c8d;
+        }
+        
+        .flow-arrow::before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 2px;
+            height: 40px;
+            background: linear-gradient(to bottom, #4ecdc4, #45b7d1);
+        }
+        
+        .flow-arrow::after {
+            content: '▼';
+            background: white;
+            padding: 5px 10px;
+            border-radius: 15px;
+            border: 2px solid #4ecdc4;
+            color: #4ecdc4;
+            font-size: 1.2em;
+        }
+        
+        .data-flow {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            margin: 30px 0;
+            padding: 20px;
+            border-radius: 12px;
+            text-align: center;
+        }
+        
+        .data-flow h3 {
+            margin-top: 0;
+            font-size: 1.3em;
+        }
+        
+        .flow-steps {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+        
+        .flow-step {
+            background: rgba(255,255,255,0.2);
+            padding: 10px 15px;
+            border-radius: 8px;
+            margin: 5px;
+            flex: 1;
+            min-width: 120px;
+            backdrop-filter: blur(10px);
+        }
+        
+        .security-badge {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: linear-gradient(135deg, #2ecc71, #27ae60);
+            color: white;
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: 600;
+        }
+        
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+            margin: 15px 0;
+        }
+        
+        .metric-item {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 8px;
+            text-align: center;
+            border: 1px solid #e9ecef;
+        }
+        
+        .metric-value {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        
+        .metric-label {
+            font-size: 0.8em;
+            color: #7f8c8d;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🏗️ Scalable Disk Monitoring Architecture</h1>
+            <p>Multi-Account AWS Solution with Ansible Orchestration</p>
+        </div>
+        
+        <div class="security-badge">
+            🔒 Zero Trust Security
+        </div>
+        
+        <div class="diagram-container">
+            <!-- Central Monitoring Account -->
+            <div class="account-section central-account">
+                <div class="account-title">
+                    <div class="aws-icon">AWS</div>
+                    Central Monitoring Account (Hub)
+                </div>
+                <div class="service-grid">
+                    <div class="service-box">
+                        <div class="service-icon cloudwatch">CW</div>
+                        <div class="service-name">CloudWatch</div>
+                        <div class="service-desc">Centralized metrics aggregation & dashboards</div>
+                    </div>
+                    <div class="service-box">
+                        <div class="service-icon iam">IAM</div>
+                        <div class="service-name">Cross-Account IAM</div>
+                        <div class="service-desc">Secure role assumption & access control</div>
+                    </div>
+                    <div class="service-box">
+                        <div class="service-icon sns">SNS</div>
+                        <div class="service-name">SNS/SQS</div>
+                        <div class="service-desc">Alert routing & notification management</div>
+                    </div>
+                    <div class="service-box">
+                        <div class="service-icon ansible">ANS</div>
+                        <div class="service-name">Ansible Control</div>
+                        <div class="service-desc">Orchestration & configuration management</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="flow-arrow"></div>
+            
+            <!-- Target Accounts -->
+            <div class="account-section target-account">
+                <div class="account-title">
+                    <div class="aws-icon">AWS</div>
+                    Target Account A (Production)
+                </div>
+                <div class="service-grid">
+                    <div class="service-box">
+                        <div class="service-icon ec2">EC2</div>
+                        <div class="service-name">EC2 Instances</div>
+                        <div class="service-desc">Production workloads with monitoring agents</div>
+                    </div>
+                    <div class="service-box">
+                        <div class="service-icon ssm">SSM</div>
+                        <div class="service-name">Systems Manager</div>
+                        <div class="service-desc">Agent deployment & patch management</div>
+                    </div>
+                    <div class="service-box">
+                        <div class="service-icon config">CFG</div>
+                        <div class="service-name">AWS Config</div>
+                        <div class="service-desc">Resource discovery & compliance tracking</div>
+                    </div>
+                    <div class="service-box">
+                        <div class="service-icon cloudwatch">CW</div>
+                        <div class="service-name">Local CloudWatch</div>
+                        <div class="service-desc">Local metrics collection & forwarding</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="account-section target-account">
+                <div class="account-title">
+                    <div class="aws-icon">AWS</div>
+                    Target Account B (Staging)
+                </div>
+                <div class="service-grid">
+                    <div class="service-box">
+                        <div class="service-icon ec2">EC2</div>
+                        <div class="service-name">EC2 Instances</div>
+                        <div class="service-desc">Staging workloads with monitoring agents</div>
+                    </div>
+                    <div class="service-box">
+                        <div class="service-icon ssm">SSM</div>
+                        <div class="service-name">Systems Manager</div>
+                        <div class="service-desc">Agent deployment & patch management</div>
+                    </div>
+                    <div class="service-box">
+                        <div class="service-icon config">CFG</div>
+                        <div class="service-name">AWS Config</div>
+                        <div class="service-desc">Resource discovery & compliance tracking</div>
+                    </div>
+                    <div class="service-box">
+                        <div class="service-icon cloudwatch">CW</div>
+                        <div class="service-name">Local CloudWatch</div>
+                        <div class="service-desc">Local metrics collection & forwarding</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Data Flow Section -->
+            <div class="data-flow">
+                <h3>📊 Data Flow & Processing Pipeline</h3>
+                <div class="flow-steps">
+                    <div class="flow-step">
+                        <strong>1. Discovery</strong><br>
+                        Auto-detect EC2 instances via AWS Config
+                    </div>
+                    <div class="flow-step">
+                        <strong>2. Deployment</strong><br>
+                        Ansible deploys CloudWatch agents
+                    </div>
+                    <div class="flow-step">
+                        <strong>3. Collection</strong><br>
+                        Agents collect disk metrics
+                    </div>
+                    <div class="flow-step">
+                        <strong>4. Aggregation</strong><br>
+                        Central account consolidates data
+                    </div>
+                    <div class="flow-step">
+                        <strong>5. Analysis</strong><br>
+                        CloudWatch processes & alerts
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Key Metrics -->
+            <div class="account-section">
+                <div class="account-title">
+                    📈 Key Monitoring Metrics
+                </div>
+                <div class="metrics-grid">
+                    <div class="metric-item">
+                        <div class="metric-value">95%</div>
+                        <div class="metric-label">Critical Alert Threshold</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-value">85%</div>
+                        <div class="metric-label">Warning Alert Threshold</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-value">5min</div>
+                        <div class="metric-label">Metric Collection Interval</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-value">24/7</div>
+                        <div class="metric-label">Monitoring Coverage</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-value">99.9%</div>
+                        <div class="metric-label">System Availability SLA</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-value">&lt;$1</div>
+                        <div class="metric-label">Cost per Instance/Month</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // Add hover effects and interactions
+        document.querySelectorAll('.service-box').forEach(box => {
+            box.addEventListener('click', function() {
+                const serviceName = this.querySelector('.service-name').textContent;
+                const serviceDesc = this.querySelector('.service-desc').textContent;
+                alert(`${serviceName}\n\n${serviceDesc}`);
+            });
+        });
+        
+        // Add loading animation
+        window.addEventListener('load', function() {
+            const boxes = document.querySelectorAll('.service-box');
+            boxes.forEach((box, index) => {
+                setTimeout(() => {
+                    box.style.opacity = '0';
+                    box.style.transform = 'translateY(20px)';
+                    box.style.transition = 'all 0.6s ease';
+                    
+                    setTimeout(() => {
+                        box.style.opacity = '1';
+                        box.style.transform = 'translateY(0)';
+                    }, 100);
+                }, index * 100);
+            });
+        });
+    </script>
+</body>
+</html>

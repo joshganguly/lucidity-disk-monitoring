@@ -1,0 +1,793 @@
+# ===================================================================
+# File: playbooks/site.yml
+# Main orchestration playbook for disk monitoring deployment
+# ===================================================================
+---
+- name: Deploy Disk Monitoring Solution to check disk usage across VMs
+  hosts: localhost
+  gather_facts: false
+  vars:
+    central_account_id: "123456789012"
+    monitoring_regions:
+      - us-east-1
+      - us-west-2
+      - eu-west-1
+    target_accounts:
+      - account_id: "123456789013"
+        environment: "production"
+        role_name: "MonitoredAccountRole"
+      - account_id: "123456789014"
+        environment: "staging"
+        role_name: "MonitoredAccountRole"
+  
+  tasks:
+    - name: Setup cross-account IAM roles
+      include_role:
+        name: setup_iam_roles
+      vars:
+        account_list: "{{ target_accounts }}"
+    
+    - name: Deploy monitoring infrastructure
+      include_role:
+        name: deploy_monitoring
+      vars:
+        regions: "{{ monitoring_regions }}"
+    
+    - name: Configure CloudWatch dashboards
+      include_role:
+        name: setup_dashboards
+      vars:
+        accounts: "{{ target_accounts }}"
+
+---
+# ===================================================================
+# File: playbooks/deploy_agents.yml
+# Playbook for deploying CloudWatch agents to EC2 instances
+# ===================================================================
+- name: Deploy CloudWatch Agents to All Accounts
+  hosts: localhost
+  gather_facts: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  
+  tasks:
+    - name: Get list of target accounts
+      set_fact:
+        accounts: "{{ target_accounts | default([]) }}"
+    
+    - name: Deploy agents per account
+      include_tasks: tasks/deploy_agents_per_account.yml
+      loop: "{{ accounts }}"
+      loop_control:
+        loop_var: account
+
+---
+# ===================================================================
+# File: roles/setup_iam_roles/tasks/main.yml
+# Role to setup cross-account IAM roles and policies
+# ===================================================================
+---
+- name: Create monitoring role in central account
+  amazon.aws.iam_role:
+    name: "CentralMonitoringRole"
+    assume_role_policy_document: |
+      {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "ec2.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          },
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::{{ central_account_id }}:root"
+            },
+            "Action": "sts:AssumeRole",
+            "Condition": {
+              "Bool": {
+                "aws:MultiFactorAuthPresent": "true"
+              }
+            }
+          }
+        ]
+      }
+    managed_policies:
+      - "arn:aws:iam::aws:policy/CloudWatchFullAccess"
+      - "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
+    state: present
+  register: central_role
+
+- name: Create cross-account assume role policy
+  amazon.aws.iam_role:
+    name: "CrossAccountAssumeRole"
+    assume_role_policy_document: |
+      {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": "arn:aws:iam::{{ central_account_id }}:role/CentralMonitoringRole"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }
+    managed_policies:
+      - "arn:aws:iam::aws:policy/ReadOnlyAccess"
+    inline_policies:
+      CrossAccountMonitoring: |
+        {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "sts:AssumeRole"
+              ],
+              "Resource": [
+                {% for account in account_list %}
+                "arn:aws:iam::{{ account.account_id }}:role/{{ account.role_name }}"{{ "," if not loop.last else "" }}
+                {% endfor %}
+              ]
+            }
+          ]
+        }
+    state: present
+
+- name: Create CloudWatch agent IAM role
+  amazon.aws.iam_role:
+    name: "CloudWatchAgentServerRole"
+    assume_role_policy_document: |
+      {
+        "Version": "2012-10-17",
+        "Statement": [
+          {
+            "Effect": "Allow",
+            "Principal": {
+              "Service": "ec2.amazonaws.com"
+            },
+            "Action": "sts:AssumeRole"
+          }
+        ]
+      }
+    managed_policies:
+      - "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+      - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+    state: present
+
+- name: Create instance profile for CloudWatch agent
+  amazon.aws.iam_instance_profile:
+    name: "CloudWatchAgentServerProfile"
+    roles:
+      - "CloudWatchAgentServerRole"
+    state: present
+
+---
+# ===================================================================
+# File: roles/deploy_monitoring/tasks/main.yml
+# Role to deploy monitoring infrastructure
+# ===================================================================
+---
+- name: Create CloudWatch log groups
+  amazon.aws.cloudwatchlogs_log_group:
+    log_group_name: "/aws/ec2/diskmonitoring"
+    retention: 30
+    state: present
+  loop: "{{ regions }}"
+  vars:
+    ansible_aws_region: "{{ item }}"
+
+- name: Deploy CloudWatch custom metrics
+  amazon.aws.cloudwatch_metric_alarm:
+    name: "DiskUsage-Critical-{{ item.account_id }}"
+    metric_name: "DiskUtilization"
+    namespace: "Custom/DiskMonitoring"
+    statistic: "Average"
+    comparison: "GreaterThanThreshold"
+    threshold: 95.0
+    period: 300
+    evaluation_periods: 2
+    alarm_actions:
+      - "arn:aws:sns:{{ ansible_aws_region | default('us-east-1') }}:{{ central_account_id }}:DiskMonitoringAlerts"
+    state: present
+  loop: "{{ target_accounts }}"
+  vars:
+    ansible_aws_region: "{{ regions[0] }}"
+
+- name: Create SNS topic for alerts
+  amazon.aws.sns_topic:
+    name: "DiskMonitoringAlerts"
+    display_name: "Disk Monitoring Alerts"
+    subscriptions:
+      - endpoint: "ops-team@company.com"
+        protocol: "email"
+      - endpoint: "https://hooks.slack.com/services/webhook"
+        protocol: "https"
+    state: present
+  loop: "{{ regions }}"
+  vars:
+    ansible_aws_region: "{{ item }}"
+
+---
+# ===================================================================
+# File: roles/setup_dashboards/tasks/main.yml
+# Role to create CloudWatch dashboards
+# ===================================================================
+---
+- name: Create main disk monitoring dashboard
+  amazon.aws.cloudwatch_dashboard:
+    name: "DiskMonitoring-Overview"
+    dashboard_body: |
+      {
+        "widgets": [
+          {
+            "type": "metric",
+            "x": 0,
+            "y": 0,
+            "width": 12,
+            "height": 6,
+            "properties": {
+              "metrics": [
+                ["Custom/DiskMonitoring", "DiskUtilization", "AccountId", "{{ item.account_id }}"],
+                [".", "AvailableSpace", ".", "."],
+                [".", "InodeUtilization", ".", "."]
+              ],
+              "view": "timeSeries",
+              "stacked": false,
+              "region": "{{ ansible_aws_region }}",
+              "title": "Disk Metrics - {{ item.environment | title }}",
+              "period": 300
+            }
+          },
+          {
+            "type": "metric",
+            "x": 0,
+            "y": 6,
+            "width": 12,
+            "height": 6,
+            "properties": {
+              "metrics": [
+                ["Custom/DiskMonitoring", "DiskUtilization"]
+              ],
+              "view": "singleValue",
+              "region": "{{ ansible_aws_region }}",
+              "title": "Current Disk Usage"
+            }
+          }
+        ]
+      }
+    state: present
+  loop: "{{ accounts }}"
+  vars:
+    ansible_aws_region: "{{ regions[0] }}"
+
+---
+# ===================================================================
+# File: tasks/deploy_agents_per_account.yml
+# Task file for deploying agents to a specific account
+# ===================================================================
+---
+- name: Assume role in target account
+  community.aws.sts_assume_role:
+    role_arn: "arn:aws:iam::{{ account.account_id }}:role/{{ account.role_name }}"
+    role_session_name: "AnsibleDiskMonitoring"
+    duration_seconds: 3600
+  register: assumed_role
+
+- name: Set temporary credentials
+  set_fact:
+    temp_credentials:
+      AWS_ACCESS_KEY_ID: "{{ assumed_role.sts_creds.access_key }}"
+      AWS_SECRET_ACCESS_KEY: "{{ assumed_role.sts_creds.secret_key }}"
+      AWS_SESSION_TOKEN: "{{ assumed_role.sts_creds.session_token }}"
+
+- name: Get list of EC2 instances in account
+  amazon.aws.ec2_instance_info:
+    filters:
+      instance-state-name: running
+    aws_access_key: "{{ temp_credentials.AWS_ACCESS_KEY_ID }}"
+    aws_secret_key: "{{ temp_credentials.AWS_SECRET_ACCESS_KEY }}"
+    aws_session_token: "{{ temp_credentials.AWS_SESSION_TOKEN }}"
+  register: ec2_instances
+
+- name: Deploy CloudWatch agent to instances
+  include_tasks: install_cloudwatch_agent.yml
+  loop: "{{ ec2_instances.instances }}"
+  loop_control:
+    loop_var: instance
+  when: ec2_instances.instances | length > 0
+
+---
+# ===================================================================
+# File: tasks/install_cloudwatch_agent.yml
+# Task file for installing CloudWatch agent on individual instances
+# ===================================================================
+---
+- name: Check if CloudWatch agent is already installed
+  amazon.aws.ssm_command:
+    instance_ids:
+      - "{{ instance.instance_id }}"
+    document_name: "AWS-RunShellScript"
+    parameters:
+      commands:
+        - "systemctl status amazon-cloudwatch-agent || echo 'not_installed'"
+    aws_access_key: "{{ temp_credentials.AWS_ACCESS_KEY_ID }}"
+    aws_secret_key: "{{ temp_credentials.AWS_SECRET_ACCESS_KEY }}"
+    aws_session_token: "{{ temp_credentials.AWS_SESSION_TOKEN }}"
+  register: agent_status
+  ignore_errors: true
+
+- name: Install CloudWatch agent
+  amazon.aws.ssm_command:
+    instance_ids:
+      - "{{ instance.instance_id }}"
+    document_name: "AWS-ConfigureAWSPackage"
+    parameters:
+      action: "Install"
+      name: "AmazonCloudWatchAgent"
+    aws_access_key: "{{ temp_credentials.AWS_ACCESS_KEY_ID }}"
+    aws_secret_key: "{{ temp_credentials.AWS_SECRET_ACCESS_KEY }}"
+    aws_session_token: "{{ temp_credentials.AWS_SESSION_TOKEN }}"
+  when: "'not_installed' in (agent_status.stdout | default(''))"
+  register: install_result
+
+- name: Create CloudWatch agent configuration
+  amazon.aws.ssm_command:
+    instance_ids:
+      - "{{ instance.instance_id }}"
+    document_name: "AWS-RunShellScript"
+    parameters:
+      commands:
+        - |
+          cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json << 'EOF'
+          {
+            "agent": {
+              "metrics_collection_interval": 300,
+              "run_as_user": "cwagent"
+            },
+            "metrics": {
+              "namespace": "Custom/DiskMonitoring",
+              "metrics_collected": {
+                "disk": {
+                  "measurement": [
+                    "used_percent",
+                    "free",
+                    "total",
+                    "used"
+                  ],
+                  "metrics_collection_interval": 300,
+                  "resources": [
+                    "*"
+                  ],
+                  "totalmetric": false,
+                  "ignore_file_system_types": [
+                    "sysfs",
+                    "devtmpfs",
+                    "tmpfs"
+                  ]
+                },
+                "mem": {
+                  "measurement": [
+                    "mem_used_percent"
+                  ],
+                  "metrics_collection_interval": 300
+                }
+              },
+              "append_dimensions": {
+                "AccountId": "{{ account.account_id }}",
+                "Environment": "{{ account.environment }}",
+                "InstanceId": "${aws:InstanceId}",
+                "InstanceType": "${aws:InstanceType}",
+                "ImageId": "${aws:ImageId}"
+              }
+            },
+            "logs": {
+              "logs_collected": {
+                "files": {
+                  "collect_list": [
+                    {
+                      "file_path": "/var/log/messages",
+                      "log_group_name": "/aws/ec2/diskmonitoring",
+                      "log_stream_name": "{instance_id}-{hostname}-messages"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+          EOF
+    aws_access_key: "{{ temp_credentials.AWS_ACCESS_KEY_ID }}"
+    aws_secret_key: "{{ temp_credentials.AWS_SECRET_ACCESS_KEY }}"
+    aws_session_token: "{{ temp_credentials.AWS_SESSION_TOKEN }}"
+
+- name: Start CloudWatch agent
+  amazon.aws.ssm_command:
+    instance_ids:
+      - "{{ instance.instance_id }}"
+    document_name: "AmazonCloudWatch-ManageAgent"
+    parameters:
+      action: "configure"
+      mode: "ec2"
+      optionalConfigurationSource: "ssm"
+      optionalConfigurationLocation: "/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json"
+      optionalRestart: "yes"
+    aws_access_key: "{{ temp_credentials.AWS_ACCESS_KEY_ID }}"
+    aws_secret_key: "{{ temp_credentials.AWS_SECRET_ACCESS_KEY }}"
+    aws_session_token: "{{ temp_credentials.AWS_SESSION_TOKEN }}"
+
+---
+# ===================================================================
+# File: roles/setup_alerts/tasks/main.yml
+# Role to setup advanced alerting and automation
+# ===================================================================
+---
+- name: Create Lambda function for automated remediation
+  amazon.aws.lambda_function:
+    name: "disk-space-cleanup"
+    runtime: "python3.9"
+    role: "arn:aws:iam::{{ central_account_id }}:role/LambdaExecutionRole"
+    handler: "lambda_function.lambda_handler"
+    zip_file: |
+      import json
+      import boto3
+      import logging
+      
+      logger = logging.getLogger()
+      logger.setLevel(logging.INFO)
+      
+      def lambda_handler(event, context):
+          """
+          Automated disk cleanup function triggered by CloudWatch alarms
+          """
+          try:
+              # Parse the SNS message
+              message = json.loads(event['Records'][0]['Sns']['Message'])
+              instance_id = message.get('Trigger', {}).get('Dimensions', [{}])[0].get('value')
+              
+              if not instance_id:
+                  logger.error("No instance ID found in alarm")
+                  return {'statusCode': 400, 'body': 'No instance ID'}
+              
+              ssm = boto3.client('ssm')
+              
+              # Execute cleanup commands
+              cleanup_commands = [
+                  "find /tmp -type f -atime +7 -delete",
+                  "find /var/log -name '*.log.1' -delete",
+                  "journalctl --vacuum-time=7d",
+                  "apt-get clean || yum clean all",
+                  "docker system prune -f || true"
+              ]
+              
+              response = ssm.send_command(
+                  InstanceIds=[instance_id],
+                  DocumentName="AWS-RunShellScript",
+                  Parameters={
+                      'commands': cleanup_commands
+                  }
+              )
+              
+              logger.info(f"Cleanup initiated for instance {instance_id}")
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(f'Cleanup initiated for {instance_id}')
+              }
+              
+          except Exception as e:
+              logger.error(f"Error in cleanup function: {str(e)}")
+              return {
+                  'statusCode': 500,
+                  'body': json.dumps(f'Error: {str(e)}')
+              }
+    state: present
+
+- name: Create EventBridge rule for new EC2 instances
+  amazon.aws.cloudwatchevent_rule:
+    name: "NewEC2InstanceRule"
+    description: "Trigger when new EC2 instances are launched"
+    event_pattern: |
+      {
+        "source": ["aws.ec2"],
+        "detail-type": ["EC2 Instance State-change Notification"],
+        "detail": {
+          "state": ["running"]
+        }
+      }
+    targets:
+      - id: "1"
+        arn: "arn:aws:lambda:{{ ansible_aws_region }}:{{ central_account_id }}:function:auto-enroll-monitoring"
+    state: present
+
+- name: Create auto-enrollment Lambda function
+  amazon.aws.lambda_function:
+    name: "auto-enroll-monitoring"
+    runtime: "python3.9"
+    role: "arn:aws:iam::{{ central_account_id }}:role/LambdaExecutionRole"
+    handler: "lambda_function.lambda_handler"
+    zip_file: |
+      import json
+      import boto3
+      import logging
+      
+      logger = logging.getLogger()
+      logger.setLevel(logging.INFO)
+      
+      def lambda_handler(event, context):
+          """
+          Automatically enroll new EC2 instances in monitoring
+          """
+          try:
+              instance_id = event['detail']['instance-id']
+              account_id = event['account']
+              region = event['region']
+              
+              ssm = boto3.client('ssm')
+              
+              # Install and configure CloudWatch agent
+              ssm.send_command(
+                  InstanceIds=[instance_id],
+                  DocumentName="AWS-ConfigureAWSPackage",
+                  Parameters={
+                      'action': ['Install'],
+                      'name': ['AmazonCloudWatchAgent']
+                  }
+              )
+              
+              logger.info(f"Auto-enrolled instance {instance_id} in monitoring")
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Success')
+              }
+              
+          except Exception as e:
+              logger.error(f"Error in auto-enrollment: {str(e)}")
+              return {
+                  'statusCode': 500,
+                  'body': json.dumps(f'Error: {str(e)}')
+              }
+    state: present
+
+---
+# ===================================================================
+# File: group_vars/all.yml
+# Global variables for the monitoring solution
+# ===================================================================
+---
+# Central monitoring account configuration
+central_account_id: "123456789012"
+central_region: "us-east-1"
+
+# Target accounts to monitor
+target_accounts:
+  - account_id: "123456789013"
+    environment: "production"
+    role_name: "MonitoredAccountRole"
+    regions:
+      - "us-east-1"
+      - "us-west-2"
+  - account_id: "123456789014"
+    environment: "staging"
+    role_name: "MonitoredAccountRole"
+    regions:
+      - "us-east-1"
+  - account_id: "123456789015"
+    environment: "development"
+    role_name: "MonitoredAccountRole"
+    regions:
+      - "us-east-1"
+
+# Monitoring configuration
+monitoring_config:
+  metric_collection_interval: 300  # 5 minutes
+  log_retention_days: 30
+  dashboard_refresh_interval: 300
+  
+  # Alert thresholds
+  thresholds:
+    critical: 95  # %
+    warning: 85   # %
+    info: 75      # %
+  
+  # Notification settings
+  notifications:
+    email: "ops-team@company.com"
+    slack_webhook: "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+    pagerduty_key: "YOUR_PAGERDUTY_INTEGRATION_KEY"
+
+# CloudWatch agent configuration template
+cloudwatch_agent_config:
+  agent:
+    metrics_collection_interval: "{{ monitoring_config.metric_collection_interval }}"
+    run_as_user: "cwagent"
+  metrics:
+    namespace: "Custom/DiskMonitoring"
+    append_dimensions:
+      Environment: "{{ item.environment | default('unknown') }}"
+      AccountId: "{{ item.account_id }}"
+
+# Lambda function configuration
+lambda_config:
+  runtime: "python3.9"
+  timeout: 300
+  memory_size: 512
+  
+# Tags for all resources
+common_tags:
+  Project: "DiskMonitoring"
+  Owner: "Infrastructure"
+  Environment: "{{ item.environment | default('shared') }}"
+  ManagedBy: "Ansible"
+
+---
+# ===================================================================
+# File: inventory/aws_ec2.yml
+# Dynamic inventory configuration for AWS EC2
+# ===================================================================
+---
+plugin: amazon.aws.aws_ec2
+regions:
+  - us-east-1
+  - us-west-2
+  - eu-west-1
+
+# Use multiple accounts
+boto_profile: default
+
+keyed_groups:
+  # Group by instance state
+  - key: instance_state_name
+    prefix: state
+  # Group by instance type
+  - key: instance_type
+    prefix: type
+  # Group by environment tag
+  - key: tags.Environment | default('untagged')
+    prefix: env
+  # Group by account ID
+  - key: owner_id
+    prefix: account
+
+compose:
+  # Create ansible_host variable
+  ansible_host: public_ip_address | default(private_ip_address)
+  # Set instance name
+  instance_name: tags.Name | default(instance_id)
+  # Set environment
+  environment: tags.Environment | default('unknown')
+
+filters:
+  # Only running instances
+  - instance_state_name: running
+  # Only instances with required tags
+  - tag:Monitoring: enabled
+
+---
+# ===================================================================
+# File: scripts/deploy.sh
+# Deployment script for the monitoring solution
+# ===================================================================
+#!/bin/bash
+
+set -e
+
+# Configuration
+ANSIBLE_DIR="$(dirname "$0")/.."
+INVENTORY_FILE="inventory/aws_ec2.yml"
+PLAYBOOK="playbooks/site.yml"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+log_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Pre-deployment checks
+check_prerequisites() {
+    log_info "Checking prerequisites..."
+    
+    # Check if AWS CLI is configured
+    if ! aws sts get-caller-identity &>/dev/null; then
+        log_error "AWS CLI not configured or no valid credentials"
+        exit 1
+    fi
+    
+    # Check if Ansible is installed
+    if ! command -v ansible-playbook &>/dev/null; then
+        log_error "Ansible not installed"
+        exit 1
+    fi
+    
+    # Check if required Ansible collections are installed
+    if ! ansible-galaxy collection list | grep -q amazon.aws; then
+        log_warn "Installing required Ansible collections..."
+        ansible-galaxy collection install amazon.aws community.aws
+    fi
+    
+    log_info "Prerequisites check passed"
+}
+
+# Validate configuration
+validate_config() {
+    log_info "Validating configuration..."
+    
+    # Check if inventory file exists
+    if [[ ! -f "$ANSIBLE_DIR/$INVENTORY_FILE" ]]; then
+        log_error "Inventory file not found: $INVENTORY_FILE"
+        exit 1
+    fi
+    
+    # Test inventory
+    if ! ansible-inventory -i "$ANSIBLE_DIR/$INVENTORY_FILE" --list &>/dev/null; then
+        log_error "Invalid inventory configuration"
+        exit 1
+    fi
+    
+    log_info "Configuration validation passed"
+}
+
+# Deploy monitoring solution
+deploy_monitoring() {
+    log_info "Starting deployment of disk monitoring solution..."
+    
+    cd "$ANSIBLE_DIR"
+    
+    # Run the main playbook
+    ansible-playbook \
+        -i "$INVENTORY_FILE" \
+        "$PLAYBOOK" \
+        --extra-vars "deployment_timestamp=$(date -u +%Y%m%d_%H%M%S)" \
+        -v
+    
+    if [[ $? -eq 0 ]]; then
+        log_info "Deployment completed successfully"
+    else
+        log_error "Deployment failed"
+        exit 1
+    fi
+}
+
+# Post-deployment verification
+verify_deployment() {
+    log_info "Verifying deployment..."
+    
+    # Check if CloudWatch dashboards were created
+    aws cloudwatch list-dashboards --query 'DashboardEntries[?contains(DashboardName, `DiskMonitoring`)]' --output table
+    
+    # Check if SNS topics were created
+    aws sns list-topics --query 'Topics[?contains(TopicArn, `DiskMonitoring`)]' --output table
+    
+    log_info "Deployment verification completed"
+}
+
+# Main execution
+main() {
+    log_info "Starting disk monitoring solution deployment"
+    
+    check_prerequisites
+    validate_config
+    deploy_monitoring
+    verify_deployment
+    
+    log_info "Deployment process completed successfully!"
+    log_info "Check the CloudWatch console for dashboards and metrics"
+}
+
+# Execute main function
+main "$@"
