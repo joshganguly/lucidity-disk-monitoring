@@ -92,7 +92,7 @@ This solution provides a comprehensive, scalable disk monitoring system for AWS 
 
 ## 🏗️ Architecture
 
-![Architecture Diagram](docs/images/architecture_diagram.png)
+![Architecture Diagram](docs/images/architecture_diagram.html)
 
 ### Core Components
 - **Central Monitoring Account**: Data aggregation and dashboards
